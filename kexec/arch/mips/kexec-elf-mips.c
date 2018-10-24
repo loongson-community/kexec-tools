@@ -32,6 +32,9 @@
 #include "../../fs2dt.h"
 #include "../../dt-ops.h"
 
+#define KSEG0_OFFSET  0x80000000
+#define INITRD_OFFSET 0x04000000
+
 static const int probe_debug = 0;
 
 #define BOOTLOADER         "kexec"
@@ -75,11 +78,12 @@ int elf_mips_load(int argc, char **argv, const char *buf, off_t len,
 	int command_line_len = 0;
 	char *crash_cmdline;
 	int result;
-	unsigned long cmdline_addr;
+	unsigned long initrd_addr, cmdline_addr;
 	size_t i;
-	off_t dtb_length;
-	char *dtb_buf;
+	off_t dtb_length = 0;
+	char *dtb_buf = NULL;
 	char *initrd_buf = NULL;
+	char extra_cmdline_buf[64];
 	unsigned long long kernel_addr = 0, kernel_size = 0;
 	unsigned long pagesize = getpagesize();
 
@@ -139,7 +143,7 @@ int elf_mips_load(int argc, char **argv, const char *buf, off_t len,
 		cmdline_addr = (unsigned long)info->segment[0].mem +
 				info->segment[0].memsz;
 	else
-		cmdline_addr = 0;
+		cmdline_addr = 0x10000; /* Skip exception handlers */
 
 	/* MIPS systems that have been converted to use device tree
 	 * passed through UHI will use commandline in the DTB and
@@ -158,28 +162,36 @@ int elf_mips_load(int argc, char **argv, const char *buf, off_t len,
 
 		/* Create initrd entries in dtb - although at this time
 		 * they would not point to the correct location */
-		dtb_set_initrd(&dtb_buf, &dtb_length, initrd_buf, initrd_buf + initrd_size);
+		if (dtb_buf)
+			dtb_set_initrd(&dtb_buf, &dtb_length, initrd_buf, initrd_buf + initrd_size);
+
+		initrd_addr = kernel_addr + kernel_size + dtb_length;
+		if (initrd_addr < INITRD_OFFSET)
+			initrd_addr = INITRD_OFFSET;
 
 		initrd_base = add_buffer(info, initrd_buf, initrd_size,
 					initrd_size, sizeof(void *),
-					_ALIGN_UP(kernel_addr + kernel_size + dtb_length,
-						pagesize), 0x0fffffff, 1);
+					_ALIGN_UP(initrd_addr, pagesize), 0x0fffffff, 1);
+
+		sprintf(extra_cmdline_buf, " rd_start=0x%x rd_size=0x%x",
+				  initrd_base + KSEG0_OFFSET, initrd_size);
+		strncat(cmdline_buf, extra_cmdline_buf, strlen(extra_cmdline_buf) + 1);
 
 		/* Now that the buffer for initrd is prepared, update the dtb
 		 * with an appropriate location */
-		dtb_set_initrd(&dtb_buf, &dtb_length, initrd_base, initrd_base + initrd_size);
+		if (dtb_buf)
+			dtb_set_initrd(&dtb_buf, &dtb_length, initrd_base, initrd_base + initrd_size);
 	}
 
-
-	/* This is a legacy method for commandline passing used
-	 * currently by Octeon CPUs only */
+	/* This is a legacy method for commandline passing */
 	add_buffer(info, cmdline_buf, sizeof(cmdline_buf),
 			sizeof(cmdline_buf), sizeof(void *),
 			cmdline_addr, 0x0fffffff, 1);
 
-	add_buffer(info, dtb_buf, dtb_length, dtb_length, 0,
-		_ALIGN_UP(kernel_addr + kernel_size, pagesize),
-		0x0fffffff, 1);
+	if (dtb_buf)
+		add_buffer(info, dtb_buf, dtb_length, dtb_length, 0,
+			_ALIGN_UP(kernel_addr + kernel_size, pagesize),
+			0x0fffffff, 1);
 
 	return 0;
 }
